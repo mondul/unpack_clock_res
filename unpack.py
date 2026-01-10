@@ -199,13 +199,53 @@ def _classify_ref(raw_offset: int, length: int, hdr: Header) -> Optional[RefKey]
     return None
 
 
-def _payload_looks_like(img_type: int, payload: bytes) -> bool:
-    if img_type == 9:  # jpg
-        return len(payload) >= 4 and payload[:2] == b"\xff\xd8" and payload[-2:] == b"\xff\xd9"
-    if img_type == 3:  # gif
-        return len(payload) >= 10 and payload[:6] in {b"GIF87a", b"GIF89a"} and payload[-1:] == b"\x3b"
-    # For rgb/indexed payloads we can't reliably validate without deeper parsing.
+def _looks_like_jpeg(data: bytes) -> bool:
+    # Require SOI and a Start-Of-Scan marker; this rejects tiny bogus slices.
+    if len(data) < 64:
+        return False
+    if not (data[:2] == b"\xff\xd8" and data[2:3] == b"\xff"):
+        return False
+    if data.find(b"\xff\xda") == -1:  # SOS
+        return False
+    # EOI is nice to have, but some encoders omit it; accept either.
     return True
+
+
+def _looks_like_png(data: bytes) -> bool:
+    if len(data) < 32:
+        return False
+    if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return False
+    return data.rfind(b"IEND") != -1
+
+
+def _looks_like_gif(data: bytes) -> bool:
+    if len(data) < 16:
+        return False
+    if data[:6] not in {b"GIF87a", b"GIF89a"}:
+        return False
+    return data[-1:] == b"\x3b"  # trailer
+
+
+def _looks_like_bmp(data: bytes) -> bool:
+    if len(data) < 32:
+        return False
+    return data[:2] == b"BM"
+
+
+def _looks_like_raw_image(data: bytes) -> bool:
+    return _looks_like_jpeg(data) or _looks_like_png(data) or _looks_like_gif(data) or _looks_like_bmp(data)
+
+
+def _looks_like_custom_chunk(chunk: bytes) -> bool:
+    # gen_clock chunks have a 16-byte header described in parse_chunk().
+    if len(chunk) < 16:
+        return False
+    img_type = chunk[0]
+    compressed = chunk[1] in (0, 1)
+    if not compressed:
+        return False
+    return img_type in {3, 9, 71, 72, 73, 74, 75}
 
 
 def _looks_like_ref(file_data: bytes, raw_offset: int, length: int, hdr: Header, min_len: int) -> bool:
@@ -220,19 +260,28 @@ def _looks_like_ref(file_data: bytes, raw_offset: int, length: int, hdr: Header,
     if abs_end > len(file_data) or abs_start < 0:
         return False
     chunk = file_data[abs_start:abs_end]
+    # Accept either a raw image blob (jpg/png/gif/bmp) OR a custom chunk header.
+    if _looks_like_raw_image(chunk):
+        return True
+
     if len(chunk) < 16:
-        return False
+        # Some watchfaces appear to store proprietary/unknown image payloads.
+        # To avoid missing those entirely, accept only when the slice is large
+        # enough to be unlikely a random false-positive.
+        return length >= max(min_len, 256)
 
     img_type = chunk[0]
     compressed = chunk[1] == 1
     if img_type not in {3, 9, 71, 72, 73, 74, 75}:
-        return False
-    # If uncompressed, validate the payload signature for common formats.
+        return length >= max(min_len, 256)
     if not compressed:
+        # Uncompressed custom-chunk payload should itself look like the encoded format.
         payload = chunk[16:]
-        if not _payload_looks_like(img_type, payload):
+        if img_type == 9 and not _looks_like_jpeg(payload):
             return False
-
+        if img_type == 3 and not _looks_like_gif(payload):
+            return False
+        # For rgb/indexed payloads we can't cheaply validate here.
     return True
 
 
@@ -527,7 +576,7 @@ def parse_chunk(chunk: bytes) -> Tuple[str, Optional[bytes], Dict[str, object]]:
     payload = chunk[16:]
     if compressed:
         if lz4_block is None:
-            meta["decompress_error"] = "lz4 not available"
+            meta["decompress_error"] = "lz4 not available (install: pip install lz4 or pip install -r requirements.txt)"
             return "bin", None, meta
         try:
             payload = lz4_block.decompress(payload, uncompressed_size=payload_len)
@@ -764,6 +813,9 @@ def main() -> None:
     parser.add_argument("--min-chunk-len", type=int, default=16, help="minimum length to treat a pair as image chunk")
     parser.add_argument("--area-num-count", type=int, default=4, help="assumed count for dataType==112 area_num list")
     args = parser.parse_args()
+
+    if lz4_block is None:
+        print("warning: python module 'lz4' is not installed; compressed chunks will not be decoded (pip install lz4)")
 
     data = args.source.read_bytes()
     hdr = parse_header(data)
