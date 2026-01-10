@@ -4,8 +4,6 @@ Unpack helper for resources produced by `gen_clock/gen_clock.py` (V3 format).
 
 ## Format Layout
 
-See `gen_clock.py::gen_clock_res`:
-
 - **Bytes 0..7**: 8-byte magic string (`Sb@*O2GG` or `II@*24dG`)
 - **Bytes 8..31**: Big-endian fields
     - `clock_id` (4 bytes)
@@ -56,18 +54,18 @@ pip install -r dev-requirements.txt
 ```
 Windows (PowerShell):
 
-```powershell
+```
 python .\unpack.py .\ClockXXXXX_res
 ```
 
 Unix / WSL:
 
-```bash
+```
 python ./unpack.py ./ClockXXXXX_res
 ```
 
 On success the script creates an output folder named `ClockXXXXX_res_unpacked` containing:
 
 - Raw data: `manifest.json`, `layers.json`, chunks_raw
-- Extracted resources (redy to reassemble with gen_clock tool) in chunks_decoded
+- Extracted resources (ready to reassemble with gen_clock tool) in chunks_decoded
 
