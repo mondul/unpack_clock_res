@@ -237,6 +237,18 @@ def _looks_like_raw_image(data: bytes) -> bool:
     return _looks_like_jpeg(data) or _looks_like_png(data) or _looks_like_gif(data) or _looks_like_bmp(data)
 
 
+def _raw_image_ext(data: bytes) -> Optional[str]:
+    if _looks_like_png(data):
+        return "png"
+    if _looks_like_jpeg(data):
+        return "jpg"
+    if _looks_like_gif(data):
+        return "gif"
+    if _looks_like_bmp(data):
+        return "bmp"
+    return None
+
+
 def _looks_like_custom_chunk(chunk: bytes) -> bool:
     # gen_clock chunks have a 16-byte header described in parse_chunk().
     if len(chunk) < 16:
@@ -413,6 +425,15 @@ def parse_layers(
         )
 
         for idx in range(num):
+            # drawType 71 with dataType 44/45 begins with two parameter ints
+            if draw_type == 71 and idx in {0, 1}:
+                v = ctx.try_read_i32()
+                if v is None:
+                    ctx.pos = len(data)
+                    break
+                layer.imgArr.append(v)
+                continue
+
             # Structured image record with two leading ints
             if draw_type in {10, 15, 21}:
                 p0 = ctx.try_read_i32()
@@ -627,10 +648,11 @@ def extract_refs(data: bytes, hdr: Header, refs: List[Ref], out_dir: Path) -> No
         ref.height = meta.get("height")
         ref.header_ok = bool(meta.get("header_ok", False)) if meta else None
 
-        if payload:
-            decoded_bytes: Optional[bytes] = None
-            decoded_ext = ext
+        decoded_bytes: Optional[bytes] = None
+        decoded_ext: Optional[str] = None
 
+        if payload:
+            decoded_ext = ext
             if ref.img_type in {3, 9}:  # gif/jpg, already raw
                 decoded_bytes = payload
             elif ref.img_type == 75:  # index8-like payload (palette + pixels)
@@ -641,12 +663,17 @@ def extract_refs(data: bytes, hdr: Header, refs: List[Ref], out_dir: Path) -> No
             elif ref.img_type in {71, 72, 73, 74}:
                 decoded_bytes = _decode_rgb_payload(ref.img_type, ref.width or 0, ref.height or 0, payload)
                 decoded_ext = "png" if decoded_bytes else ext
+        else:
+            raw_ext = _raw_image_ext(chunk)
+            if raw_ext:
+                decoded_bytes = chunk
+                decoded_ext = raw_ext
 
-            if decoded_bytes:
-                decoded_name = f"chunk_{ref.id:03d}.{decoded_ext}"
-                decoded_path = decoded_dir / decoded_name
-                decoded_path.write_bytes(decoded_bytes)
-                ref.file_decoded = str(decoded_path.relative_to(out_dir))
+        if decoded_bytes and decoded_ext:
+            decoded_name = f"chunk_{ref.id:03d}.{decoded_ext}"
+            decoded_path = decoded_dir / decoded_name
+            decoded_path.write_bytes(decoded_bytes)
+            ref.file_decoded = str(decoded_path.relative_to(out_dir))
 
 
 def write_outputs(
