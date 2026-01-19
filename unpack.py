@@ -130,6 +130,7 @@ class Ref:
     width: Optional[int] = None
     height: Optional[int] = None
     header_ok: Optional[bool] = None
+    layer_ids: List[int] = field(default_factory=list)
 
 
 @dataclass
@@ -309,11 +310,19 @@ def parse_layers(
     refs: List[Ref] = []
     ref_index: Dict[RefKey, int] = {}
 
-    def register_ref(key: RefKey) -> int:
+    def register_ref(key: RefKey, layer_id: Optional[int]) -> int:
         if key in ref_index:
-            return ref_index[key]
+            ref_id = ref_index[key]
+            if layer_id is not None:
+                ref = refs[ref_id]
+                if layer_id not in ref.layer_ids:
+                    ref.layer_ids.append(layer_id)
+            return ref_id
         ref_id = len(refs)
-        refs.append(Ref(id=ref_id, key=key))
+        new_ref = Ref(id=ref_id, key=key)
+        if layer_id is not None:
+            new_ref.layer_ids.append(layer_id)
+        refs.append(new_ref)
         ref_index[key] = ref_id
         return ref_id
 
@@ -412,6 +421,7 @@ def parse_layers(
         if align_type is None or x is None or y is None or num is None:
             break
 
+        layer_id = len(layers)
         layer = Layer(
             drawType=draw_type,
             dataType=data_type,
@@ -446,7 +456,7 @@ def parse_layers(
                 key = _classify_ref(raw_off, length, hdr)
                 entry = {
                     "params": [p0, p1],
-                    "ref": register_ref(key) if key else None,
+                    "ref": register_ref(key, layer_id) if key else None,
                     "raw_offset": raw_off,
                     "length": length,
                 }
@@ -483,7 +493,7 @@ def parse_layers(
                 if _looks_like_ref(file_data, raw_off, length, hdr, min_len):
                     ctx.pos += 4
                     key = _classify_ref(raw_off, length, hdr)
-                    layer.imgArr.append({"ref": register_ref(key), "raw_offset": raw_off, "length": length})
+                    layer.imgArr.append({"ref": register_ref(key, layer_id), "raw_offset": raw_off, "length": length})
                     continue
 
             # Fallback: treat as plain int
@@ -620,7 +630,13 @@ def parse_chunk(chunk: bytes) -> Tuple[str, Optional[bytes], Dict[str, object]]:
     return ext, payload, meta
 
 
-def extract_refs(data: bytes, hdr: Header, refs: List[Ref], out_dir: Path) -> None:
+def extract_refs(
+    data: bytes,
+    hdr: Header,
+    refs: List[Ref],
+    layers: List[Layer],
+    out_dir: Path,
+) -> Dict[Tuple[int, int], Dict[str, str]]:
     img_blob = data[hdr.img_start : hdr.img_start + hdr.img_len]
     z_blob = data[hdr.z_start : hdr.z_start + hdr.z_len]
 
@@ -629,6 +645,19 @@ def extract_refs(data: bytes, hdr: Header, refs: List[Ref], out_dir: Path) -> No
     raw_dir.mkdir(parents=True, exist_ok=True)
     decoded_dir.mkdir(parents=True, exist_ok=True)
 
+    layer_refs: List[List[int]] = []
+    for layer in layers:
+        seen: set[int] = set()
+        ordered: List[int] = []
+        for entry in layer.imgArr:
+            if isinstance(entry, dict) and isinstance(entry.get("ref"), int):
+                ref_id = int(entry["ref"])
+                if ref_id not in seen:
+                    seen.add(ref_id)
+                    ordered.append(ref_id)
+        layer_refs.append(ordered)
+
+    ref_payloads: Dict[int, Dict[str, object]] = {}
     for ref in refs:
         blob = img_blob if ref.key.kind == "img" else z_blob
         start = ref.key.offset
@@ -636,11 +665,6 @@ def extract_refs(data: bytes, hdr: Header, refs: List[Ref], out_dir: Path) -> No
         if end > len(blob):
             continue
         chunk = blob[start:end]
-
-        raw_name = f"chunk_{ref.id:03d}_{ref.key.kind}.bin"
-        raw_path = raw_dir / raw_name
-        raw_path.write_bytes(chunk)
-        ref.file_raw = str(raw_path.relative_to(out_dir))
 
         ext, payload, meta = parse_chunk(chunk)
         ref.img_type = meta.get("img_type")
@@ -669,11 +693,47 @@ def extract_refs(data: bytes, hdr: Header, refs: List[Ref], out_dir: Path) -> No
                 decoded_bytes = chunk
                 decoded_ext = raw_ext
 
-        if decoded_bytes and decoded_ext:
-            decoded_name = f"chunk_{ref.id:03d}.{decoded_ext}"
-            decoded_path = decoded_dir / decoded_name
-            decoded_path.write_bytes(decoded_bytes)
-            ref.file_decoded = str(decoded_path.relative_to(out_dir))
+        ref_payloads[ref.id] = {
+            "chunk": chunk,
+            "decoded_bytes": decoded_bytes,
+            "decoded_ext": decoded_ext,
+        }
+
+    file_map: Dict[Tuple[int, int], Dict[str, str]] = {}
+    for layer_id, ref_ids in enumerate(layer_refs):
+        layer_tag = f"layer_{layer_id:03d}"
+        for local_idx, ref_id in enumerate(ref_ids):
+            payload = ref_payloads.get(ref_id)
+            if not payload:
+                continue
+            ref = refs[ref_id]
+            chunk = payload["chunk"]
+
+            raw_name = f"{layer_tag}_chunk_{local_idx:03d}_{ref.key.kind}.bin"
+            raw_path = raw_dir / raw_name
+            raw_path.write_bytes(chunk)
+            rel_raw = str(raw_path.relative_to(out_dir))
+
+            if ref.file_raw is None:
+                ref.file_raw = rel_raw
+
+            decoded_bytes = payload.get("decoded_bytes")
+            decoded_ext = payload.get("decoded_ext")
+            rel_decoded: Optional[str] = None
+            if decoded_bytes and decoded_ext:
+                decoded_name = f"{layer_tag}_chunk_{local_idx:03d}.{decoded_ext}"
+                decoded_path = decoded_dir / decoded_name
+                decoded_path.write_bytes(decoded_bytes)
+                rel_decoded = str(decoded_path.relative_to(out_dir))
+                if ref.file_decoded is None:
+                    ref.file_decoded = rel_decoded
+
+            entry: Dict[str, str] = {"raw": rel_raw}
+            if rel_decoded:
+                entry["decoded"] = rel_decoded
+            file_map[(layer_id, ref_id)] = entry
+
+    return file_map
 
 
 def write_outputs(
@@ -681,6 +741,7 @@ def write_outputs(
     hdr: Header,
     layers: List[Layer],
     refs: List[Ref],
+    layer_ref_files: Dict[Tuple[int, int], Dict[str, str]],
     thumb: bytes,
     layer_blob: bytes,
 ) -> None:
@@ -778,10 +839,15 @@ def write_outputs(
     }
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
 
-    _emit_config(out_dir, layers, refs)
+    _emit_config(out_dir, layers, refs, layer_ref_files)
 
 
-def _emit_config(out_dir: Path, layers: List[Layer], refs: List[Ref]) -> None:
+def _emit_config(
+    out_dir: Path,
+    layers: List[Layer],
+    refs: List[Ref],
+    layer_ref_files: Dict[Tuple[int, int], Dict[str, str]],
+) -> None:
     """Generate a config-like json that points at decoded chunk files.
 
     Because original filenames are not preserved inside the .res, the emitted
@@ -792,7 +858,12 @@ def _emit_config(out_dir: Path, layers: List[Layer], refs: List[Ref]) -> None:
     decoded_dir = out_dir / "chunks_decoded"
     decoded_dir.mkdir(parents=True, exist_ok=True)
 
-    def ref_name(ref_id: int) -> str:
+    def ref_name(layer_id: int, ref_id: int) -> str:
+        layer_entry = layer_ref_files.get((layer_id, ref_id))
+        if layer_entry:
+            path_str = layer_entry.get("decoded") or layer_entry.get("raw")
+            if path_str:
+                return Path(path_str).name
         ref = refs[ref_id]
         path_str = ref.file_decoded or ref.file_raw
         if not path_str:
@@ -800,7 +871,7 @@ def _emit_config(out_dir: Path, layers: List[Layer], refs: List[Ref]) -> None:
         return Path(path_str).name
 
     config_layers: List[Dict[str, object]] = []
-    for layer in layers:
+    for layer_id, layer in enumerate(layers):
         item: Dict[str, object] = {
             "drawType": layer.drawType,
             "dataType": layer.dataType,
@@ -818,9 +889,9 @@ def _emit_config(out_dir: Path, layers: List[Layer], refs: List[Ref]) -> None:
         for entry in layer.imgArr:
             if isinstance(entry, dict):
                 if "params" in entry and "ref" in entry:
-                    img_arr.append([entry["params"][0], entry["params"][1], ref_name(entry["ref"])])
+                    img_arr.append([entry["params"][0], entry["params"][1], ref_name(layer_id, entry["ref"])])
                 elif "ref" in entry:
-                    img_arr.append(ref_name(entry["ref"]))
+                    img_arr.append(ref_name(layer_id, entry["ref"]))
                 else:
                     img_arr.append(entry)
             else:
@@ -859,8 +930,8 @@ def main() -> None:
     )
 
     out_dir = args.out or args.source.parent / f"{args.source.name}_unpacked"
-    extract_refs(data, hdr, refs, out_dir)
-    write_outputs(out_dir, hdr, layers, refs, thumb, layer_blob)
+    layer_ref_files = extract_refs(data, hdr, refs, layers, out_dir)
+    write_outputs(out_dir, hdr, layers, refs, layer_ref_files, thumb, layer_blob)
 
     print(f"done; wrote layers.json and {len(refs)} chunk(s) to {out_dir}")
 
