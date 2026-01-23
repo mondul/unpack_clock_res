@@ -340,60 +340,121 @@ def parse_layers(
         """Infer variable-length area_num list for dataType==112.
 
         gen_clock.py writes all values in config.json without storing a count.
-        We infer the count by scanning candidates and choosing the first that
-        yields plausible align/x/y/num and does not run past the buffer.
+        We infer the count by scanning candidates and choosing the best fit
+        based on plausible align/x/y/num values and the next layer header.
         """
 
         # After area_num: alignType, x, y, num
         # Keep the search bounded to avoid pathological files.
         max_by_size = max(0, (ctx0.remaining() - 16) // 4)
-        max_candidates = min(32, max_by_size)
+        max_candidates = min(64, max_by_size)
 
-        def plausible(candidate_pos: int) -> bool:
-            if candidate_pos + 16 > len(ctx0.data):
+        def looks_like_layer_header(at: int) -> bool:
+            if at + 8 > len(ctx0.data):
                 return False
+            next_draw = struct.unpack_from(">i", ctx0.data, at)[0]
+            next_data = struct.unpack_from(">i", ctx0.data, at + 4)[0]
+            if not (0 <= next_draw <= 300):
+                return False
+            if not (0 <= next_data <= 300):
+                return False
+            return True
+
+        def candidate_score(candidate_pos: int, count: int) -> Optional[Tuple[int, int, int, int]]:
+            if candidate_pos + 16 > len(ctx0.data):
+                return None
             align = struct.unpack_from(">i", ctx0.data, candidate_pos)[0]
             x = struct.unpack_from(">i", ctx0.data, candidate_pos + 4)[0]
             y = struct.unpack_from(">i", ctx0.data, candidate_pos + 8)[0]
             num = struct.unpack_from(">i", ctx0.data, candidate_pos + 12)[0]
 
-            # Heuristics: alignType is small-ish, num is non-negative and not huge,
-            # x/y should be within reasonable watchface coordinate ranges.
-            if not (-4 <= align <= 32):
-                return False
+            # Basic sanity checks to avoid obvious misalignment.
+            if not (-1000 <= align <= 2000):
+                return None
             if not (0 <= num <= 512):
-                return False
-            if not (-5000 <= x <= 5000 and -5000 <= y <= 5000):
-                return False
+                return None
+            if not (-10000 <= x <= 10000 and -10000 <= y <= 10000):
+                return None
 
             after_header = candidate_pos + 16
-            rem = len(ctx0.data) - after_header
-            return rem >= _min_bytes_for_img_arr(draw_type, num)
 
-        # Prefer the user-provided count if it looks valid.
+            def possible_img_sizes(dt: int, n: int) -> List[int]:
+                if n <= 0:
+                    return [0]
+                if dt in {10, 15, 21}:
+                    return [n * 16]
+                sizes = {n * 4, n * 8}
+                if dt == 55 and n > 2:
+                    sizes = {n * 4 + 26, n * 8 + 26}
+                return sorted(sizes)
+
+            sizes = possible_img_sizes(draw_type, num)
+            viable_sizes = [s for s in sizes if after_header + s <= len(ctx0.data)]
+            if not viable_sizes:
+                return None
+
+            # Score: higher is better.
+            score = 0
+            if num > 0:
+                score += 2
+            if 0 <= align <= 5:
+                score += 1
+            best_next_score = -1
+            best_next_pos = None
+            for s in viable_sizes:
+                next_pos = after_header + s
+                if next_pos >= len(ctx0.data):
+                    next_score = 1
+                elif looks_like_layer_header(next_pos):
+                    next_score = 3
+                else:
+                    next_score = 0
+                if next_score > best_next_score:
+                    best_next_score = next_score
+                    best_next_pos = next_pos
+
+            if best_next_score <= 0:
+                return None
+            score += best_next_score
+
+            # Prefer smaller area_num counts when scores tie.
+            score -= count // 16
+
+            return (score, align, num, best_next_pos or after_header)
+
+        best_count: Optional[int] = None
+        best_score: Optional[int] = None
+
+        # Try preferred count first but still score it.
         preferred = area_num_count
         if 0 <= preferred <= max_candidates:
             cand_pos = ctx0.pos + preferred * 4
-            if plausible(cand_pos):
-                vals = [ctx0.try_read_i32() for _ in range(preferred)]
-                if all(v is not None for v in vals):
-                    return [int(v) for v in vals]  # type: ignore[arg-type]
+            scored = candidate_score(cand_pos, preferred)
+            if scored is not None:
+                best_count = preferred
+                best_score = scored[0]
 
-        # Otherwise scan for a plausible split.
+        # Scan all candidates to find the best match.
         for c in range(0, max_candidates + 1):
             cand_pos = ctx0.pos + c * 4
-            if plausible(cand_pos):
-                vals: List[int] = []
-                ok = True
-                for _ in range(c):
-                    v = ctx0.try_read_i32()
-                    if v is None:
-                        ok = False
-                        break
-                    vals.append(v)
-                if ok:
-                    return vals
-        return None
+            scored = candidate_score(cand_pos, c)
+            if scored is None:
+                continue
+            score = scored[0]
+            if best_score is None or score > best_score or (score == best_score and best_count is not None and c < best_count):
+                best_score = score
+                best_count = c
+
+        if best_count is None:
+            return None
+
+        vals: List[int] = []
+        for _ in range(best_count):
+            v = ctx0.try_read_i32()
+            if v is None:
+                return None
+            vals.append(int(v))
+        return vals
 
     while ctx.pos < len(data):
         start_pos = ctx.pos
