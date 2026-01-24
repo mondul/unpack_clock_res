@@ -1,1 +1,1 @@
-Initial release. This version supports most of the ClockXXX_res files for DT smart watches.
+
