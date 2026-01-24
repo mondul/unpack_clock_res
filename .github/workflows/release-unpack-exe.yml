@@ -1,0 +1,92 @@
+name: Release unpack_clock_res exe
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - RELEASE_NOTES.md
+      - unpack.py
+      - requirements.txt
+      - pyproject.toml
+      - .github/workflows/release-unpack-exe.yml
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read release notes
+        id: notes
+        shell: pwsh
+        run: |
+          $notesPath = "RELEASE_NOTES.md"
+          if (-not (Test-Path $notesPath)) {
+            "skip=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+            exit 0
+          }
+          $notes = Get-Content -Raw $notesPath
+          $trim = $notes.Trim()
+          if ([string]::IsNullOrWhiteSpace($trim)) {
+            "skip=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+            exit 0
+          }
+          $firstLine = ($notes -split "`n")[0].Trim()
+          if ($firstLine -match '^Version:\s*(\S+)') {
+            $tag = "v$($Matches[1])"
+          } else {
+            $tag = "v$(Get-Date -Format yyyy.MM.dd-HHmm)"
+          }
+          "skip=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Set up Python
+        if: steps.notes.outputs.skip != 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install dependencies
+        if: steps.notes.outputs.skip != 'true'
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          if (Test-Path requirements.txt) { python -m pip install -r requirements.txt }
+          python -m pip install pyinstaller
+
+      - name: Build exe
+        if: steps.notes.outputs.skip != 'true'
+        shell: pwsh
+        run: |
+          python -m PyInstaller --onefile --name unpack_clock_res unpack.py
+
+      - name: Create release
+        if: steps.notes.outputs.skip != 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.notes.outputs.tag }}
+          name: unpack_clock_res ${{ steps.notes.outputs.tag }}
+          body_path: RELEASE_NOTES.md
+          files: dist/unpack_clock_res.exe
+          draft: false
+          prerelease: false
+
+      - name: Clear release notes
+        if: steps.notes.outputs.skip != 'true'
+        shell: pwsh
+        run: |
+          Set-Content -Path RELEASE_NOTES.md -Value ""
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add RELEASE_NOTES.md
+          if (-not (git diff --cached --quiet)) {
+            git commit -m "chore: clear release notes"
+            git push
+          }
