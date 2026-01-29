@@ -715,18 +715,7 @@ def extract_refs(
     raw_dir.mkdir(parents=True, exist_ok=True)
     decoded_dir.mkdir(parents=True, exist_ok=True)
 
-    layer_refs: List[List[int]] = []
-    for layer in layers:
-        seen: set[int] = set()
-        ordered: List[int] = []
-        for entry in layer.imgArr:
-            if isinstance(entry, dict) and isinstance(entry.get("ref"), int):
-                ref_id = int(entry["ref"])
-                if ref_id not in seen:
-                    seen.add(ref_id)
-                    ordered.append(ref_id)
-        layer_refs.append(ordered)
-
+    # First pass: extract and decode all unique refs
     ref_payloads: Dict[int, Dict[str, object]] = {}
     for ref in refs:
         blob = img_blob if ref.key.kind == "img" else z_blob
@@ -763,46 +752,37 @@ def extract_refs(
                 decoded_bytes = chunk
                 decoded_ext = raw_ext
 
+        # Write each unique ref only once
+        raw_name = f"chunk_{ref.id:03d}_{ref.key.kind}.bin"
+        raw_path = raw_dir / raw_name
+        raw_path.write_bytes(chunk)
+        ref.file_raw = str(raw_path.relative_to(out_dir))
+
+        if decoded_bytes and decoded_ext:
+            prefix = "z_" if ref.key.kind == "z_img" else ""
+            decoded_name = f"{prefix}chunk_{ref.id:03d}.{decoded_ext}"
+            decoded_path = decoded_dir / decoded_name
+            decoded_path.write_bytes(decoded_bytes)
+            ref.file_decoded = str(decoded_path.relative_to(out_dir))
+
         ref_payloads[ref.id] = {
             "chunk": chunk,
             "decoded_bytes": decoded_bytes,
             "decoded_ext": decoded_ext,
         }
 
+    # Build file_map for backward compatibility (maps layer_id, ref_id to file paths)
     file_map: Dict[Tuple[int, int], Dict[str, str]] = {}
-    for layer_id, ref_ids in enumerate(layer_refs):
-        layer_tag = f"layer_{layer_id:03d}"
-        for local_idx, ref_id in enumerate(ref_ids):
-            payload = ref_payloads.get(ref_id)
-            if not payload:
-                continue
-            ref = refs[ref_id]
-            chunk = payload["chunk"]
-
-            raw_name = f"{layer_tag}_chunk_{local_idx:03d}_{ref.key.kind}.bin"
-            raw_path = raw_dir / raw_name
-            raw_path.write_bytes(chunk)
-            rel_raw = str(raw_path.relative_to(out_dir))
-
-            if ref.file_raw is None:
-                ref.file_raw = rel_raw
-
-            decoded_bytes = payload.get("decoded_bytes")
-            decoded_ext = payload.get("decoded_ext")
-            rel_decoded: Optional[str] = None
-            if decoded_bytes and decoded_ext:
-                prefix = "z_" if ref.key.kind == "z_img" else ""
-                decoded_name = f"{prefix}{layer_tag}_chunk_{local_idx:03d}.{decoded_ext}"
-                decoded_path = decoded_dir / decoded_name
-                decoded_path.write_bytes(decoded_bytes)
-                rel_decoded = str(decoded_path.relative_to(out_dir))
-                if ref.file_decoded is None:
-                    ref.file_decoded = rel_decoded
-
-            entry: Dict[str, str] = {"raw": rel_raw}
-            if rel_decoded:
-                entry["decoded"] = rel_decoded
-            file_map[(layer_id, ref_id)] = entry
+    for layer_id, layer in enumerate(layers):
+        for entry in layer.imgArr:
+            if isinstance(entry, dict) and isinstance(entry.get("ref"), int):
+                ref_id = int(entry["ref"])
+                if ref_id < len(refs):
+                    ref = refs[ref_id]
+                    file_entry: Dict[str, str] = {"raw": ref.file_raw}
+                    if ref.file_decoded:
+                        file_entry["decoded"] = ref.file_decoded
+                    file_map[(layer_id, ref_id)] = file_entry
 
     return file_map
 
@@ -929,12 +909,10 @@ def _emit_config(
     decoded_dir = out_dir / "chunks_decoded"
     decoded_dir.mkdir(parents=True, exist_ok=True)
 
-    def ref_name(layer_id: int, ref_id: int) -> str:
-        layer_entry = layer_ref_files.get((layer_id, ref_id))
-        if layer_entry:
-            path_str = layer_entry.get("decoded") or layer_entry.get("raw")
-            if path_str:
-                return Path(path_str).name
+    def ref_name(ref_id: int) -> str:
+        """Get the filename for a ref, using deduplicated filenames."""
+        if ref_id >= len(refs):
+            return f"ref_{ref_id}.bin"
         ref = refs[ref_id]
         path_str = ref.file_decoded or ref.file_raw
         if not path_str:
@@ -960,9 +938,9 @@ def _emit_config(
         for entry in layer.imgArr:
             if isinstance(entry, dict):
                 if "params" in entry and "ref" in entry:
-                    img_arr.append([entry["params"][0], entry["params"][1], ref_name(layer_id, entry["ref"])])
+                    img_arr.append([entry["params"][0], entry["params"][1], ref_name(entry["ref"])])
                 elif "ref" in entry:
-                    img_arr.append(ref_name(layer_id, entry["ref"]))
+                    img_arr.append(ref_name(entry["ref"]))
                 else:
                     img_arr.append(entry)
             else:
