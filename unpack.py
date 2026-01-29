@@ -496,6 +496,15 @@ def parse_layers(
         )
 
         for idx in range(num):
+            # drawType 100: first 7 elements are integers, rest are image refs
+            if draw_type == 100 and idx < 7:
+                v = ctx.try_read_i32()
+                if v is None:
+                    ctx.pos = len(data)
+                    break
+                layer.imgArr.append(v)
+                continue
+
             # drawType 71 with dataType 44/45 begins with two parameter ints
             if draw_type == 71 and idx in {0, 1}:
                 v = ctx.try_read_i32()
@@ -782,7 +791,8 @@ def extract_refs(
             decoded_ext = payload.get("decoded_ext")
             rel_decoded: Optional[str] = None
             if decoded_bytes and decoded_ext:
-                decoded_name = f"{layer_tag}_chunk_{local_idx:03d}.{decoded_ext}"
+                prefix = "z_" if ref.key.kind == "z_img" else ""
+                decoded_name = f"{prefix}{layer_tag}_chunk_{local_idx:03d}.{decoded_ext}"
                 decoded_path = decoded_dir / decoded_name
                 decoded_path.write_bytes(decoded_bytes)
                 rel_decoded = str(decoded_path.relative_to(out_dir))
