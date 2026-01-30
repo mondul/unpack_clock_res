@@ -51,6 +51,33 @@ def _to_png(width: int, height: int, mode: str, raw_data: bytes, raw_mode: str =
 
 MAGICS = {b"Sb@*O2GG", b"II@*24dG"}
 
+# Resolution prefix to dimensions mapping (bits 16-23 of clock_id)
+RESOLUTION_MAP = {
+    0x0F0000: "454x454",
+    0x0E0000: "400x400",
+    0x0D0000: "466x466",
+    0x0C0000: "390x390",
+    0x0B0000: "410x502",
+    0x0A0000: "320x384",  # Also 320x385
+    0x090000: "368x448",
+    0x080000: "390x450",
+    0x070000: "360x360",
+}
+
+
+def decode_clock_id(clock_id: int) -> Dict[str, object]:
+    """Decode clock_id into type, resolution, and base ID."""
+    is_internal = (clock_id & 0x80000000) != 0
+    resolution_prefix = clock_id & 0x00FF0000
+    base_id = clock_id & 0x0000FFFF
+    
+    return {
+        "type": "internal" if is_internal else "custom",
+        "resolution": RESOLUTION_MAP.get(resolution_prefix, "unknown"),
+        "clock_id": base_id,
+        "raw_clock_id": clock_id,
+    }
+
 
 @dataclass
 class Header:
@@ -833,9 +860,13 @@ def write_outputs(
     (out_dir / "layer_data.bin").write_bytes(layer_blob)
 
     def header_to_dict(header: Header) -> Dict[str, object]:
+        clock_info = decode_clock_id(header.clock_id)
         return {
             "magic": header.magic.decode(errors="ignore"),
-            "clock_id": header.clock_id,
+            "type": clock_info["type"],
+            "resolution": clock_info["resolution"],
+            "clock_id": clock_info["clock_id"],
+            "raw_clock_id": clock_info["raw_clock_id"],
             "thumb_start": header.thumb_start,
             "thumb_len": header.thumb_len,
             "img_start": header.img_start,
