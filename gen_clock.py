@@ -46,7 +46,7 @@ def _extract_clock_id_from_src_folder(src_dir) -> int:
       continue
     if 50000 <= v <= 65535:
       return v
-  raise SystemExit(f'ERROR: --clock-id not provided and no id in folder name: {base} (expected 50000..65535)')
+  raise RuntimeError(f'--clock-id not provided and no id in folder name: {base} (expected 50000..65535)')
 
 # ------------------------------
 def _detect_clock_size_from_first_layer(src_dir):
@@ -67,34 +67,34 @@ def _detect_clock_size_from_first_layer(src_dir):
 
   config_path = path.join(src_dir, 'config.json')
   if not path.exists(config_path):
-    raise SystemExit(f'ERROR: config.json not found in: {src_dir}')
+    raise FileNotFoundError(f'config.json not found in: {src_dir}')
 
   with open(config_path, 'r', encoding='utf-8') as f:
     config = load_json(f)
   if not isinstance(config, list) or not config:
-    raise SystemExit('ERROR: config.json must be a non-empty JSON array')
+    raise RuntimeError('config.json must be a non-empty JSON array')
 
   first = config[0]
   img_arr = first.get('imgArr', [])
   if not img_arr:
-    raise SystemExit('ERROR: First config entry has empty imgArr; cannot detect resolution')
+    raise RuntimeError('First config entry has empty imgArr; cannot detect resolution')
 
   img0 = img_arr[0]
   if isinstance(img0, list):
     img0 = img0[-1]
   if not isinstance(img0, str) or not img0:
-    raise SystemExit('ERROR: First layer image reference is invalid')
+    raise RuntimeError('First layer image reference is invalid')
 
   img_path = path.join(src_dir, img0)
   if not path.exists(img_path):
-    raise SystemExit(f'ERROR: First layer image not found: {img_path}')
+    raise FileNotFoundError(f'First layer image not found: {img_path}')
 
   with Image.open(img_path) as im:
     size = im.size
 
   if size not in allowed:
     allowed_str = ', '.join([f'{w}×{h}' for (w, h) in allowed.keys()])
-    raise SystemExit(f'ERROR: Unsupported watchface resolution {size[0]}×{size[1]}. Allowed: {allowed_str}')
+    raise RuntimeError(f'Unsupported watchface resolution {size[0]}×{size[1]}. Allowed: {allowed_str}')
 
   return allowed[size]
 
@@ -124,19 +124,19 @@ def check_clock(src_dir):
   :return: list of file names
   """
   if not path.isdir(src_dir):
-    raise SystemExit('ERROR: Directory does not exist! [%s] ' % src_dir)
+    raise FileNotFoundError('Directory does not exist! [%s] ' % src_dir)
 
   clock_name = path.basename(src_dir)
 
   config_path = path.join(src_dir, 'config.json')
   if not path.exists(config_path):
-    raise SystemExit('ERROR: Config file missing! [%s] ' % config_path)
+    raise FileNotFoundError('Config file missing! [%s] ' % config_path)
 
   try:
     with open(config_path, 'r', encoding='utf-8') as config_fd:
       config = load_json(config_fd)
   except Exception as e:
-    raise SystemExit('ERROR: Config file read error! [%s] %s' % (clock_name, e))
+    raise RuntimeError('Config file read error! [%s] %s' % (clock_name, e))
 
   my_list = get_filename_list(src_dir)
   config_img_list = []
@@ -170,10 +170,10 @@ def check_clock(src_dir):
           config_img_list.append(original_img)
 
   if len(errs):
-    err_str = 'ERROR: Watchface validation failed:'
+    err_str = 'Watchface validation failed:'
     for err in errs:
       err_str += (linesep + ' • ' + err)
-    raise SystemExit(err_str)
+    raise RuntimeError(err_str)
 
   return config_img_list
 
@@ -196,7 +196,7 @@ def rgba_palette_to_bgra256(palette_rgba: list[int]) -> bytes:
   We pad/truncate to 256 entries and convert to BGRA8888 bytes.
   """
   if len(palette_rgba) % 4 != 0:
-    raise ValueError("palette length is not a multiple of 4")
+    raise RuntimeError("Palette length is not a multiple of 4")
 
   n_colors = len(palette_rgba) // 4
   if n_colors > 256:
@@ -289,15 +289,15 @@ def image_data(img_path, _compress=True):
     indices, palette = quantize_raw_rgba_bytes(rgba, width, height)
 
     if len(indices) != width * height:
-      raise SystemExit(f'ERROR: Cannot process {img_path} - Expected {width*height} index bytes, got {len(indices)}')
+      raise RuntimeError(f'Cannot process {img_path} - Expected {width*height} index bytes, got {len(indices)}')
 
     try:
       palette_bgra = rgba_palette_to_bgra256(palette)
     except Exception as e:
-      raise SystemExit(f'ERROR: Cannot process {img_path} - {e}')
+      raise RuntimeError(f'Cannot process {img_path} - {e}')
 
     if len(palette_bgra) != 1024:
-      raise SystemExit(f'ERROR: Cannot process {img_path} - Palette must be 1024 bytes (256*4)')
+      raise RuntimeError(f'Cannot process {img_path} - Palette must be 1024 bytes (256*4)')
 
     index8_payload = palette_bgra + indices
 
@@ -308,64 +308,48 @@ def image_data(img_path, _compress=True):
       try:
         img_data = compress_rgb(bytearray(header), index8_payload)
       except Exception as e:
-        raise SystemExit(f'ERROR: Cannot process {img_path} - LZ4 compression failed: {e}')
+        raise RuntimeError(f'Cannot process {img_path} - LZ4 compression failed: {e}')
     else:
       img_data = header + index8_payload
 
   else:
-    raise SystemExit(f'ERROR: Cannot process {img_path} - Unsupported image format')
+    raise RuntimeError(f'Cannot process {img_path} - Unsupported image format')
 
   return (img_data, len(img_data))
 
 # ------------------------------
-# Program entry point
-if __name__ == "__main__":
-  parser = ArgumentParser(
-    prog=path.basename(argv[0]),
-    description='Generate ATS3085-S watchface _res from a source folder.'
-  )
+def gen_clock(src_folder, clock_id, face_size, thumbnail_path, is_compressed, is_idle, is_internal, out_folder):
+  """
+  Generate the watch face
+  """
 
-  parser.add_argument('--clock-id', type=int, default=None, help='Clock id (50000..65535). If omitted, extracted from src folder name')
-  parser.add_argument('--face-size', default=None, choices=g_clock_id_prefix_dict, help='Watch face size. If omitted, extracted from image in the bottom (first) layer')
-  parser.add_argument('--thumbnail', default=None, help='Optional thumbnail image path to embed (overrides auto-detect)')
-  parser.add_argument('--no-lz4', action='store_true', help='Disable LZ4 compression (enabled by default)')
-  parser.add_argument('--idle', action='store_true', help='Use idle magic string (II@*24dG) instead of default (Sb@*O2GG)')
-  parser.add_argument('--internal', action='store_true', help='Create a factory watchface that will come pre-installed with the watch firmware')
-  parser.add_argument('--out', default=getcwd(), help='Output directory (default: current)')
-  parser.add_argument('src', metavar='source-dir', help='Source folder containing config.json and layer images')
-
-  args = parser.parse_args()
-
-  src_dir = path.abspath(args.src)
+  src_dir = path.abspath(src_folder)
   if not path.isdir(src_dir):
-    raise SystemExit(f'ERROR: Source is not a directory: {src_dir}')
+    raise NotADirectoryError(f'Source is not a directory: {src_dir}')
 
   # Clock ID
-  if args.clock_id is None:
+  if clock_id is None:
     clock_id = _extract_clock_id_from_src_folder(src_dir)
   else:
-    clock_id = args.clock_id
     if not (50000 <= clock_id <= 65535):
-      raise SystemExit(f'ERROR: --clock-id must be in [50000..65535], got {clock_id}')
+      raise RuntimeError(f'--clock-id must be in [50000..65535], got {clock_id}')
 
   # Detect resolution from first layer image and enforce watch face size
-  clock_size = args.face_size if args.face_size is not None else _detect_clock_size_from_first_layer(src_dir)
+  clock_size = face_size if face_size is not None else _detect_clock_size_from_first_layer(src_dir)
 
   clock_id |= g_clock_id_prefix_dict[clock_size]
-  if args.internal:
+  if is_internal:
     clock_id |= 0x80000000
 
   print('Generating watchface %d (0x%08X)...' % (clock_id & 0xFFFF, clock_id))
 
   # Find thumbnail if not provided
-  if args.thumbnail is None:
+  if thumbnail_path is None:
     findings = [f for f in listdir(src_dir) if regex_search(r'.*thumbnail.*(png|jpg|gif)$', f, IGNORECASE)]
     if not findings:
-      raise SystemExit(f'ERROR: --thumbnail not provided and no images named like *thumbnail* in {src_dir}')
+      raise FileNotFoundError(f'--thumbnail not provided and no images named like *thumbnail* in {src_dir}')
     else:
       thumbnail_path = path.join(src_dir, findings[0])
-  else:
-    thumbnail_path = args.thumbnail
 
   clock_img_data = b''
   clock_img_length = 0
@@ -376,11 +360,11 @@ if __name__ == "__main__":
   img_objs = {}
 
   # Process thumbnail
-  clock_thumb_data, clock_thumb_length = image_data(thumbnail_path, not args.no_lz4)
+  clock_thumb_data, clock_thumb_length = image_data(thumbnail_path, is_compressed)
 
   # Process images referenced in the config.json file
   for img in check_clock(src_dir):
-    img_data, img_length = image_data(path.join(src_dir, img), not args.no_lz4)
+    img_data, img_length = image_data(path.join(src_dir, img), is_compressed)
     if img.startswith('z_'):
       clock_z_img_data += img_data
       img_objs[img] = [clock_z_img_length, img_length]
@@ -396,7 +380,7 @@ if __name__ == "__main__":
     with open(config_path, 'r', encoding='utf-8') as conFd:
       layer_list = load_json(conFd)
   except Exception as e:
-    raise SystemExit(f'ERROR: Failed to read config file [{config_path}]: {e}')
+    raise RuntimeError(f'Failed to read config file [{config_path}]: {e}')
 
   # 32 is the clock thumbnail start address
   clock_z_img_start = 32 + clock_thumb_length + clock_img_length
@@ -440,13 +424,13 @@ if __name__ == "__main__":
         clock_layer_data += pack_struct('>i', img_objs[img][0])
         clock_layer_data += pack_struct('>i', img_objs[img][1])
 
-  out_dir = path.abspath(args.out)
+  out_dir = path.abspath(out_folder)
   makedirs(out_dir, exist_ok=True)
 
   out_file_name = path.basename(src_dir).split('_')[0].title() + '_res'
   out_path = path.join(out_dir, out_file_name)
 
-  crc_str = 'II@*24dG' if args.idle else 'Sb@*O2GG'
+  crc_str = 'II@*24dG' if is_idle else 'Sb@*O2GG'
 
   with open(out_path, 'wb+') as out_f:
     out_f.write(crc_str.encode())
@@ -463,3 +447,36 @@ if __name__ == "__main__":
     out_f.write(clock_layer_data)
 
   print(f'Watchface done: {out_path}')
+
+# ------------------------------
+# Program entry point
+if __name__ == "__main__":
+  parser = ArgumentParser(
+    prog=path.basename(argv[0]),
+    description='Generate ATS3085-S watchface _res from a source folder.'
+  )
+
+  parser.add_argument('--clock-id', type=int, default=None, help='Clock id (50000..65535). If omitted, extracted from src folder name')
+  parser.add_argument('--face-size', default=None, choices=g_clock_id_prefix_dict, help='Watch face size. If omitted, extracted from image in the bottom (first) layer')
+  parser.add_argument('--thumbnail', default=None, help='Optional thumbnail image path to embed (overrides auto-detect)')
+  parser.add_argument('--no-lz4', action='store_true', help='Disable LZ4 compression (enabled by default)')
+  parser.add_argument('--idle', action='store_true', help='Use idle magic string (II@*24dG) instead of default (Sb@*O2GG)')
+  parser.add_argument('--internal', action='store_true', help='Create a factory watchface that will come pre-installed with the watch firmware')
+  parser.add_argument('--out', default=getcwd(), help='Output directory (default: current)')
+  parser.add_argument('src', metavar='source-dir', help='Source folder containing config.json and layer images')
+
+  args = parser.parse_args()
+
+  try:
+    gen_clock(
+      args.src,
+      args.clock_id,
+      args.face_size,
+      args.thumbnail,
+      not args.no_lz4,
+      args.idle,
+      args.internal,
+      args.out
+    )
+  except Exception as e:
+    raise SystemExit(f'❌ {e}')
