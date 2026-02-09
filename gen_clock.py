@@ -339,6 +339,9 @@ def gen_clock(src_folder, clock_id, face_size, thumbnail_path, is_compressed, is
     if not (50000 <= clock_id <= 65535):
       raise RuntimeError(f'--clock-id must be in [50000..65535], got {clock_id}')
 
+  # Build output file name according to clock id
+  out_file_name = f'Clock{clock_id}_res'
+
   # Detect resolution from first layer image and enforce watch face size
   clock_size = face_size if face_size is not None else _detect_clock_size_from_first_layer(src_dir)
 
@@ -432,7 +435,6 @@ def gen_clock(src_folder, clock_id, face_size, thumbnail_path, is_compressed, is
   out_dir = path.abspath(out_folder)
   makedirs(out_dir, exist_ok=True)
 
-  out_file_name = path.basename(src_dir).split('_')[0].title() + '_res'
   out_path = path.join(out_dir, out_file_name)
 
   crc_str = 'II@*24dG' if is_idle else 'Sb@*O2GG'
